@@ -1,3 +1,9 @@
-from django.shortcuts import render
+from django.http import JsonResponse
 
-# Create your views here.
+
+def home(request):
+    return JsonResponse({
+        "success": True,
+        "message": "University Project & Thesis Management API is Running 🚀",
+        "version": "1.0.0"
+    })
