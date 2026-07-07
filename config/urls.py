@@ -13,6 +13,10 @@ urlpatterns = [
     path("api/auth/", include("accounts.urls")),
     path("api/dashboard/", include("dashboard.urls")),
     path("api/projects/", include("projects.urls")),
+    path("api/reports/", include("reports.urls")),
+    path("api/viva/", include("viva.urls")),
+    path("api/evaluation/", include("evaluation.urls")),
+    path("api/training/", include("training.urls")),
 
 ]
 
