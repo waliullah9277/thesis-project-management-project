@@ -20,6 +20,7 @@ class AdminDashboardAPIView(APIView):
             "success": True,
             "dashboard": "SUPER_ADMIN",
             "data": {
+                "total_users": User.objects.count(),
                 "total_students": User.objects.filter(role="STUDENT").count(),
                 "total_supervisors": User.objects.filter(role="SUPERVISOR").count(),
                 "total_examiners": User.objects.filter(role="EXAMINER").count(),

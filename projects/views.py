@@ -8,6 +8,7 @@ from .serializers import ProjectFeedbackSerializer, TeamSerializer, ProjectSeria
 
 from accounts.permissions import IsStudent, IsSuperAdmin, IsSupervisor
 from accounts.models import User
+from notifications.models import Notification
 
 from .models import Team, Project, ProjectFeedback
 
@@ -17,6 +18,13 @@ from .serializers import (
     AssignSupervisorSerializer,
     ProjectStatusUpdateSerializer,
 )
+
+def create_notification(user, title, message):
+    Notification.objects.create(
+        user=user,
+        title=title,
+        message=message
+    )
 
 
 class TeamListCreateAPIView(APIView):
@@ -71,7 +79,17 @@ class ProjectListCreateAPIView(APIView):
         )
 
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        project = serializer.save()
+
+        admins = User.objects.filter(role="SUPER_ADMIN")
+
+        for admin in admins:
+            create_notification(
+                admin,
+                "New Project Submitted",
+                f'{request.user.first_name} submitted a new project: "{project.title}".'
+            )
+        
 
         return Response({
             "success": True,
@@ -151,6 +169,19 @@ class AssignSupervisorAPIView(APIView):
         project.status = "IN_PROGRESS"
         project.save()
 
+        create_notification(
+        supervisor,
+        "New Project Assigned",
+        f'Project "{project.title}" has been assigned to you.'
+)
+
+        for student in project.team.members.all():
+            create_notification(
+                student,
+                "Supervisor Assigned",
+                f'{supervisor.first_name} {supervisor.last_name} has been assigned to your project "{project.title}".'
+            )
+
         return Response({
             "success": True,
             "message": "Supervisor assigned successfully.",
@@ -175,6 +206,13 @@ class ProjectStatusUpdateAPIView(APIView):
 
         project.status = serializer.validated_data["status"]
         project.save()
+
+        for student in project.team.members.all():
+            create_notification(
+            student,
+            "Project Status Updated",
+            f'Your project "{project.title}" status is now {project.status}.'
+        )
 
         return Response({
             "success": True,
@@ -224,7 +262,14 @@ class ProjectFeedbackCreateAPIView(APIView):
         )
 
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        feedback = serializer.save()
+
+        for student in project.team.members.all():
+            create_notification(
+                student,
+                "New Project Feedback",
+                f'Supervisor added feedback on your project "{project.title}".'
+            )
 
         return Response({
             "success": True,

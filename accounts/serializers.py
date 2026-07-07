@@ -41,6 +41,7 @@ class ProfileSerializer(serializers.ModelSerializer):
             "role",
             "is_first_login",
             "must_change_password",
+            "is_active",
         ]
 
 
