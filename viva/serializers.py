@@ -7,23 +7,31 @@ from .models import VivaSchedule
 
 
 class VivaScheduleSerializer(serializers.ModelSerializer):
-    project_details = ProjectSerializer(source="project", read_only=True)
+    project_title = serializers.CharField(source="project.title", read_only=True)
+    project_type = serializers.CharField(source="project.project_type", read_only=True)
+    team_name = serializers.CharField(source="project.team.name", read_only=True)
+    examiner_name = serializers.SerializerMethodField()
 
     class Meta:
         model = VivaSchedule
         fields = [
             "id",
             "project",
-            "project_details",
-            "examiner",
+            "project_title",
+            "project_type",
+            "team_name",
             "date",
             "time",
             "room",
+            "examiner",
+            "examiner_name",
             "status",
-            "created_at",
         ]
-        read_only_fields = ["created_at"]
 
+    def get_examiner_name(self, obj):
+        if obj.examiner:
+            return f"{obj.examiner.first_name} {obj.examiner.last_name}"
+        return None
 
 class AssignExaminerSerializer(serializers.Serializer):
     examiner_id = serializers.IntegerField()

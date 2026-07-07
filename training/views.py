@@ -2,6 +2,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
+from .models import Company, IndustrialTraining, TrainingFeedback
+from .serializers import TrainingFeedbackListSerializer, TrainingFeedbackCreateSerializer
 
 from accounts.permissions import IsSuperAdmin, IsStudent, IsSupervisor
 from accounts.models import User
@@ -15,7 +17,7 @@ from .serializers import (
 
 
 class CompanyListCreateAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         companies = Company.objects.all().order_by("-id")
@@ -28,6 +30,12 @@ class CompanyListCreateAPIView(APIView):
         })
 
     def post(self, request):
+        if request.user.role != "SUPER_ADMIN":
+            return Response({
+                "success": False,
+                "message": "Only super admin can create company."
+            }, status=status.HTTP_403_FORBIDDEN)
+
         serializer = CompanySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -40,7 +48,7 @@ class CompanyListCreateAPIView(APIView):
 
 
 class StudentTrainingListCreateAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsStudent]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         trainings = IndustrialTraining.objects.filter(
@@ -161,9 +169,48 @@ class SupervisorTrainingListAPIView(APIView):
 
 
 class TrainingFeedbackAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSupervisor]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, training_id):
+        try:
+            training = IndustrialTraining.objects.get(id=training_id)
+        except IndustrialTraining.DoesNotExist:
+            return Response({
+                "success": False,
+                "message": "Training record not found."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == "STUDENT" and training.student != request.user:
+            return Response({
+                "success": False,
+                "message": "You can view only your own training feedback."
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if request.user.role == "SUPERVISOR" and training.supervisor != request.user:
+            return Response({
+                "success": False,
+                "message": "You can view only your assigned training feedback."
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        feedbacks = TrainingFeedback.objects.filter(
+            training=training
+        ).order_by("-id")
+
+        serializer = TrainingFeedbackListSerializer(feedbacks, many=True)
+
+        return Response({
+            "success": True,
+            "count": feedbacks.count(),
+            "data": serializer.data
+        })
 
     def patch(self, request, training_id):
+        if request.user.role != "SUPERVISOR":
+            return Response({
+                "success": False,
+                "message": "Only supervisor can give feedback."
+            }, status=status.HTTP_403_FORBIDDEN)
+
         try:
             training = IndustrialTraining.objects.get(
                 id=training_id,
@@ -175,14 +222,17 @@ class TrainingFeedbackAPIView(APIView):
                 "message": "Training record not found or not assigned to you."
             }, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = TrainingFeedbackSerializer(data=request.data)
+        serializer = TrainingFeedbackCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        training.supervisor_feedback = serializer.validated_data["supervisor_feedback"]
-        training.save()
+        feedback = TrainingFeedback.objects.create(
+            training=training,
+            supervisor=request.user,
+            comment=serializer.validated_data["comment"]
+        )
 
         return Response({
             "success": True,
             "message": "Training feedback submitted successfully.",
-            "data": IndustrialTrainingSerializer(training).data
+            "data": TrainingFeedbackListSerializer(feedback).data
         })

@@ -82,7 +82,7 @@ class ExaminerAssignedVivaAPIView(APIView):
 
 
 class VivaStatusUpdateAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [IsAuthenticated]
 
     def patch(self, request, viva_id):
         try:
@@ -92,6 +92,20 @@ class VivaStatusUpdateAPIView(APIView):
                 "success": False,
                 "message": "Viva schedule not found."
             }, status=status.HTTP_404_NOT_FOUND)
+
+        # Only assigned examiner OR super admin can update
+        if request.user.role == "EXAMINER":
+            if viva.examiner != request.user:
+                return Response({
+                    "success": False,
+                    "message": "You can update only your assigned viva."
+                }, status=status.HTTP_403_FORBIDDEN)
+
+        elif request.user.role != "SUPER_ADMIN":
+            return Response({
+                "success": False,
+                "message": "You do not have permission to perform this action."
+            }, status=status.HTTP_403_FORBIDDEN)
 
         new_status = request.data.get("status")
 
