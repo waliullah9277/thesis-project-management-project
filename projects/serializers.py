@@ -1,6 +1,5 @@
 from rest_framework import serializers
-
-from .models import Team, Project, ProjectDocument
+from .models import Team, Project, ProjectDocument, ProjectFeedback
 from accounts.models import User
 
 
@@ -96,3 +95,48 @@ class ProjectSerializer(serializers.ModelSerializer):
         )
 
         return project
+
+class AssignSupervisorSerializer(serializers.Serializer):
+    supervisor_id = serializers.IntegerField()
+
+    def validate_supervisor_id(self, value):
+        try:
+            supervisor = User.objects.get(id=value, role="SUPERVISOR")
+        except User.DoesNotExist:
+            raise serializers.ValidationError("Valid supervisor not found.")
+
+        return value
+
+
+class ProjectStatusUpdateSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=["APPROVED", "REJECTED", "IN_PROGRESS", "COMPLETED"]
+    )
+
+class ProjectFeedbackSerializer(serializers.ModelSerializer):
+    supervisor_details = SimpleUserSerializer(source="supervisor", read_only=True)
+
+    class Meta:
+        model = ProjectFeedback
+        fields = [
+            "id",
+            "project",
+            "supervisor",
+            "supervisor_details",
+            "comment",
+            "created_at",
+        ]
+        read_only_fields = [
+            "supervisor",
+            "created_at",
+        ]
+
+    def create(self, validated_data):
+        request = self.context.get("request")
+
+        feedback = ProjectFeedback.objects.create(
+            supervisor=request.user,
+            **validated_data
+        )
+
+        return feedback

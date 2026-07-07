@@ -97,3 +97,24 @@ class ProjectDocument(models.Model):
 
     def __str__(self):
         return self.title
+
+class ProjectFeedback(models.Model):
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="feedbacks"
+    )
+
+    supervisor = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="project_feedbacks",
+        limit_choices_to={"role": "SUPERVISOR"}
+    )
+
+    comment = models.TextField()
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Feedback for {self.project.title}"
