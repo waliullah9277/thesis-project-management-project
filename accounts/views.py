@@ -195,61 +195,61 @@ class UserStatusUpdateAPIView(APIView):
 
 
 # temorary api for testing
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from accounts.models import User
+# from rest_framework.views import APIView
+# from rest_framework.response import Response
+# from rest_framework import status
+# from accounts.models import User
 
 
-class TemporaryCreateSuperAdminAPIView(APIView):
-    authentication_classes = []
-    permission_classes = []
+# class TemporaryCreateSuperAdminAPIView(APIView):
+#     authentication_classes = []
+#     permission_classes = []
 
-    def post(self, request):
-        try:
-            email = request.data.get("email")
-            password = request.data.get("password")
-            first_name = request.data.get("first_name", "Super")
-            last_name = request.data.get("last_name", "Admin")
-            phone = request.data.get("phone", "01700000000")
+#     def post(self, request):
+#         try:
+#             email = request.data.get("email")
+#             password = request.data.get("password")
+#             first_name = request.data.get("first_name", "Super")
+#             last_name = request.data.get("last_name", "Admin")
+#             phone = request.data.get("phone", "01700000000")
 
-            if not email or not password:
-                return Response({
-                    "success": False,
-                    "message": "Email and password are required."
-                }, status=400)
+#             if not email or not password:
+#                 return Response({
+#                     "success": False,
+#                     "message": "Email and password are required."
+#                 }, status=400)
 
-            if User.objects.filter(email=email).exists():
-                return Response({
-                    "success": False,
-                    "message": "User already exists."
-                }, status=400)
+#             if User.objects.filter(email=email).exists():
+#                 return Response({
+#                     "success": False,
+#                     "message": "User already exists."
+#                 }, status=400)
 
-            user = User(
-                email=email,
-                first_name=first_name,
-                last_name=last_name,
-                phone=phone,
-                role="SUPER_ADMIN",
-                is_active=True,
-                is_staff=True,
-                is_superuser=True,
-                is_first_login=False,
-                must_change_password=False,
-            )
+#             user = User(
+#                 email=email,
+#                 first_name=first_name,
+#                 last_name=last_name,
+#                 phone=phone,
+#                 role="SUPER_ADMIN",
+#                 is_active=True,
+#                 is_staff=True,
+#                 is_superuser=True,
+#                 is_first_login=False,
+#                 must_change_password=False,
+#             )
 
-            user.set_password(password)
-            user.save()
+#             user.set_password(password)
+#             user.save()
 
-            return Response({
-                "success": True,
-                "message": "Super Admin created successfully.",
-                "email": user.email,
-                "role": user.role
-            }, status=201)
+#             return Response({
+#                 "success": True,
+#                 "message": "Super Admin created successfully.",
+#                 "email": user.email,
+#                 "role": user.role
+#             }, status=201)
 
-        except Exception as e:
-            return Response({
-                "success": False,
-                "error": str(e)
-            }, status=500)
+#         except Exception as e:
+#             return Response({
+#                 "success": False,
+#                 "error": str(e)
+#             }, status=500)
