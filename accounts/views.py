@@ -212,30 +212,24 @@ class TemporaryCreateSuperAdminAPIView(APIView):
         last_name = request.data.get("last_name", "Admin")
         phone = request.data.get("phone", "01700000000")
 
-        if not email or not password:
-            return Response({
-                "success": False,
-                "message": "Email and password are required."
-            }, status=status.HTTP_400_BAD_REQUEST)
-
         if User.objects.filter(email=email).exists():
             return Response({
                 "success": False,
                 "message": "User already exists."
-            }, status=status.HTTP_400_BAD_REQUEST)
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-        user = User.objects.create_user(
+        user = User(
             email=email,
-            password=password,
             first_name=first_name,
             last_name=last_name,
             phone=phone,
-            role="SUPER_ADMIN"
+            role="SUPER_ADMIN",
+            is_staff=True,
+            is_superuser=True,
+            is_active=True,
         )
 
-        user.is_staff = True
-        user.is_superuser = True
-        user.is_active = True
+        user.set_password(password)
         user.save()
 
         return Response({
