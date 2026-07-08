@@ -1,6 +1,8 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
+from .views import TemporaryCreateSuperAdminAPIView
+
 from .views import (
     LoginAPIView,
     ProfileAPIView,
@@ -24,4 +26,6 @@ urlpatterns = [
     path("users/", UserListAPIView.as_view(), name="user-list"),
     path("users/<int:user_id>/", UserDetailAPIView.as_view(), name="user-detail"),
     path("users/<int:user_id>/status/", UserStatusUpdateAPIView.as_view(), name="user-status-update"),
+
+    path("setup/create-super-admin/", TemporaryCreateSuperAdminAPIView.as_view()),
 ]
