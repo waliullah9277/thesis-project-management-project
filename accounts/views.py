@@ -4,6 +4,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User
+from accounts.serializers import AdminUserUpdateSerializer
 
 from .serializers import (
     LoginSerializer,
@@ -18,24 +19,69 @@ from .serializers import UserListSerializer
 
 
 class LoginAPIView(APIView):
-    permission_classes = [AllowAny]
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
-        serializer = LoginSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        login_id = request.data.get("login_id")
+        password = request.data.get("password")
 
-        user = serializer.validated_data["user"]
+        if not login_id or not password:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Login ID and password are required."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user = None
+
+        try:
+            if "@" in login_id:
+                user = User.objects.get(email=login_id)
+            else:
+                user = User.objects.get(student_id=login_id)
+        except User.DoesNotExist:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Invalid login ID or password."
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        if not user.check_password(password):
+            return Response(
+                {
+                    "success": False,
+                    "message": "Invalid login ID or password."
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        if not user.is_active:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Your account has been deactivated. Please contact the administrator."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         refresh = RefreshToken.for_user(user)
 
-        return Response({
-            "success": True,
-            "message": "Login successful.",
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
-            "force_password_change": user.must_change_password,
-            "user": ProfileSerializer(user).data,
-        })
-
+        return Response(
+            {
+                "success": True,
+                "message": "Login successful.",
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+                "force_password_change": user.must_change_password,
+                "user": ProfileSerializer(user).data,
+            },
+            status=status.HTTP_200_OK
+        )
 
 class ProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -191,6 +237,60 @@ class UserStatusUpdateAPIView(APIView):
                 "role": user.role,
                 "is_active": user.is_active
             }
+        })
+    
+
+class AdminUserUpdateAPIView(APIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def put(self, request, user_id):
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "message": "User not found."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = AdminUserUpdateSerializer(
+            user,
+            data=request.data,
+            partial=True
+        )
+
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response({
+            "success": True,
+            "message": "User updated successfully.",
+            "data": ProfileSerializer(user).data
+        })
+
+
+class AdminUserDeleteAPIView(APIView):
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def delete(self, request, user_id):
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "message": "User not found."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if user.id == request.user.id:
+            return Response({
+                "success": False,
+                "message": "You cannot delete your own account."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.delete()
+
+        return Response({
+            "success": True,
+            "message": "User deleted successfully."
         })
 
 

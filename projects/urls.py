@@ -10,6 +10,10 @@ from .views import (
     SupervisorAssignedProjectListAPIView,
     ProjectFeedbackCreateAPIView,
     ProjectFeedbackListAPIView,
+    TeamMemberUpdateAPIView,
+    TeamUpdateDeleteAPIView,
+    TeamMemberInfoCreateAPIView,
+    TeamMemberInfoUpdateDeleteAPIView,
 )
 
 
@@ -24,6 +28,10 @@ urlpatterns = [
     path("supervisor/assigned/", SupervisorAssignedProjectListAPIView.as_view(), name="supervisor-assigned-projects"),
     path("<int:project_id>/feedback/", ProjectFeedbackCreateAPIView.as_view(), name="project-feedback-create"),
     path("<int:project_id>/feedbacks/", ProjectFeedbackListAPIView.as_view(), name="project-feedback-list"),
+    path("teams/<int:team_id>/members/update/", TeamMemberUpdateAPIView.as_view()),
+    path("teams/<int:team_id>/update-delete/", TeamUpdateDeleteAPIView.as_view()),
+    path("teams/<int:team_id>/members/add/", TeamMemberInfoCreateAPIView.as_view()),
+    path("teams/members/<int:member_id>/update-delete/", TeamMemberInfoUpdateDeleteAPIView.as_view()),
 
 
 ]

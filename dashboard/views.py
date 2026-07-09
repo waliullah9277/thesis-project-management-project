@@ -31,6 +31,9 @@ class AdminDashboardAPIView(APIView):
                 "total_evaluations": Evaluation.objects.count(),
                 "total_training": IndustrialTraining.objects.count(),
                 "total_notices": Notice.objects.count(),
+                "total_users": User.objects.count(),
+                "assigned_training": IndustrialTraining.objects.exclude(supervisor=None).count(),
+                "pending_training": IndustrialTraining.objects.filter(supervisor=None).count(),
             }
         })
 

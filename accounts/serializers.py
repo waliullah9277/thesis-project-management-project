@@ -149,3 +149,33 @@ class UserListSerializer(serializers.ModelSerializer):
             "created_by_email",
             "created_at",
         ]
+
+
+class AdminUserUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = [
+            "first_name",
+            "last_name",
+            "email",
+            "student_id",
+            "phone",
+            "role",
+            "is_active",
+        ]
+
+    def validate(self, attrs):
+        role = attrs.get("role", self.instance.role)
+
+        if role == "STUDENT":
+            if not attrs.get("student_id", self.instance.student_id):
+                raise serializers.ValidationError({
+                    "student_id": "Student ID is required for student."
+                })
+        else:
+            if not attrs.get("email", self.instance.email):
+                raise serializers.ValidationError({
+                    "email": "Email is required for this role."
+                })
+
+        return attrs

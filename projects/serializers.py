@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Team, Project, ProjectDocument, ProjectFeedback
+from .models import Team, Project, ProjectDocument, ProjectFeedback, TeamMemberInfo
 from accounts.models import User
 
 
@@ -16,9 +16,23 @@ class SimpleUserSerializer(serializers.ModelSerializer):
         ]
 
 
+class TeamMemberInfoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TeamMemberInfo
+        fields = [
+            "id",
+            "team",
+            "name",
+            "student_id",
+            "phone",
+            "created_at",
+        ]
+        read_only_fields = ["team", "created_at"]
+
 class TeamSerializer(serializers.ModelSerializer):
-    leader_details = SimpleUserSerializer(source="leader", read_only=True)
-    members_details = SimpleUserSerializer(source="members", many=True, read_only=True)
+    leader_name = serializers.SerializerMethodField()
+    members_info = serializers.SerializerMethodField()
+    member_infos = TeamMemberInfoSerializer(many=True, read_only=True)
 
     class Meta:
         model = Team
@@ -26,34 +40,48 @@ class TeamSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "leader",
-            "leader_details",
+            "leader_name",
             "members",
-            "members_details",
+            "members_info",
+            "member_infos",
+            "member_count",
             "created_at",
         ]
-        read_only_fields = ["leader", "created_at"]
+        read_only_fields = ["leader", "members", "created_at"]
 
-    def validate_members(self, members):
-        for member in members:
-            if member.role != "STUDENT":
-                raise serializers.ValidationError("Only students can be team members.")
-        return members
+    def validate_member_count(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Minimum 1 member is required.")
+        if value > 3:
+            raise serializers.ValidationError("Maximum 3 members are allowed.")
+        return value
 
     def create(self, validated_data):
         request = self.context.get("request")
-        members = validated_data.pop("members", [])
 
         team = Team.objects.create(
+            name=validated_data["name"],
             leader=request.user,
-            **validated_data
+            member_count=validated_data.get("member_count", 1)
         )
 
         team.members.add(request.user)
-
-        for member in members:
-            team.members.add(member)
-
         return team
+
+    def get_leader_name(self, obj):
+        return f"{obj.leader.first_name} {obj.leader.last_name}".strip()
+
+    def get_members_info(self, obj):
+        return [
+            {
+                "id": member.id,
+                "student_id": member.student_id,
+                "name": f"{member.first_name} {member.last_name}".strip(),
+                "email": member.email,
+                "phone": member.phone,
+            }
+            for member in obj.members.all()
+        ]
 
 
 class ProjectSerializer(serializers.ModelSerializer):
@@ -140,3 +168,5 @@ class ProjectFeedbackSerializer(serializers.ModelSerializer):
         )
 
         return feedback
+    
+

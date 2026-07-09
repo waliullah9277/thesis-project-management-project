@@ -4,6 +4,8 @@ from rest_framework_simplejwt.views import TokenRefreshView
 # from .views import TemporaryCreateSuperAdminAPIView
 
 from .views import (
+    AdminUserDeleteAPIView,
+    AdminUserUpdateAPIView,
     LoginAPIView,
     ProfileAPIView,
     FirstPasswordChangeAPIView,
@@ -13,6 +15,8 @@ from .views import (
     UserListAPIView,
     UserDetailAPIView,
     UserStatusUpdateAPIView,
+    AdminUserUpdateAPIView,
+    AdminUserDeleteAPIView,
 )
 
 urlpatterns = [
@@ -26,6 +30,8 @@ urlpatterns = [
     path("users/", UserListAPIView.as_view(), name="user-list"),
     path("users/<int:user_id>/", UserDetailAPIView.as_view(), name="user-detail"),
     path("users/<int:user_id>/status/", UserStatusUpdateAPIView.as_view(), name="user-status-update"),
+    path("users/<int:user_id>/update/", AdminUserUpdateAPIView.as_view(), name="admin-user-update"),
+    path("users/<int:user_id>/delete/", AdminUserDeleteAPIView.as_view()),
 
     # path("setup/create-super-admin/", TemporaryCreateSuperAdminAPIView.as_view()),
 ]
