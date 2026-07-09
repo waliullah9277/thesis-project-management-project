@@ -10,10 +10,15 @@ PROJECT_TYPE_CHOICES = (
 
 PROJECT_STATUS_CHOICES = (
     ("PENDING", "Pending"),
-    ("APPROVED", "Approved"),
-    ("REJECTED", "Rejected"),
+    ("SUPERVISOR_ASSIGNED", "Supervisor Assigned"),
+    ("REVISION_REQUIRED", "Revision Required"),
+    ("PROPOSAL_APPROVED", "Proposal Approved"),
     ("IN_PROGRESS", "In Progress"),
+    ("PROGRESS_REVIEW", "Progress Under Review"),
+    ("FINAL_SUBMITTED", "Final Submitted"),
+    ("READY_FOR_VIVA", "Ready For Viva"),
     ("COMPLETED", "Completed"),
+    ("REJECTED", "Rejected"),
 )
 
 

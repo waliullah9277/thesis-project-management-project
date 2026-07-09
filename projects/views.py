@@ -12,7 +12,7 @@ from notifications.models import Notification
 
 from .models import Team, Project, ProjectFeedback
 from .models import Team, Project, ProjectFeedback, TeamMemberInfo
-from .serializers import TeamSerializer, TeamMemberInfoSerializer
+from .serializers import TeamSerializer, TeamMemberInfoSerializer, SupervisorProjectReviewSerializer
 
 from .serializers import (
     TeamSerializer,
@@ -168,8 +168,8 @@ class AssignSupervisorAPIView(APIView):
         )
 
         project.supervisor = supervisor
-        project.status = "IN_PROGRESS"
-        project.save()
+        project.status = "SUPERVISOR_ASSIGNED"
+        project.save(update_fields=["supervisor", "status"])
 
         create_notification(
         supervisor,
@@ -521,3 +521,54 @@ class TeamMemberInfoUpdateDeleteAPIView(APIView):
             "success": True,
             "message": "Member deleted successfully."
         })
+
+
+
+class SupervisorProjectReviewAPIView(APIView):
+    permission_classes = [IsAuthenticated, IsSupervisor]
+
+    def patch(self, request, project_id):
+        try:
+            project = Project.objects.get(
+                id=project_id,
+                supervisor=request.user
+            )
+        except Project.DoesNotExist:
+            return Response({
+                "success": False,
+                "message": "Project not found or not assigned to you."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = SupervisorProjectReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        new_status = serializer.validated_data["status"]
+        comment = serializer.validated_data.get("comment", "")
+
+        project.status = new_status
+        project.save(update_fields=["status"])
+
+        if comment:
+            ProjectFeedback.objects.create(
+                project=project,
+                supervisor=request.user,
+                comment=comment
+            )
+
+        for student in project.team.members.all():
+            create_notification(
+                student,
+                "Project Status Updated",
+                f'Your project "{project.title}" status is now {new_status}.'
+            )
+
+        return Response({
+            "success": True,
+            "message": "Project status updated successfully.",
+            "data": ProjectSerializer(project).data
+        })
+
+
+
+
+

@@ -88,6 +88,8 @@ class ProjectSerializer(serializers.ModelSerializer):
     team_details = TeamSerializer(source="team", read_only=True)
     supervisor_details = SimpleUserSerializer(source="supervisor", read_only=True)
     submitted_by_details = SimpleUserSerializer(source="submitted_by", read_only=True)
+    team_name = serializers.CharField(source="team.name", read_only=True)
+    supervisor_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
@@ -95,6 +97,8 @@ class ProjectSerializer(serializers.ModelSerializer):
             "id",
             "team",
             "team_details",
+            "team_name",
+            "supervisor_name",
             "supervisor",
             "supervisor_details",
             "title",
@@ -114,6 +118,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+
     def create(self, validated_data):
         request = self.context.get("request")
 
@@ -123,6 +128,11 @@ class ProjectSerializer(serializers.ModelSerializer):
         )
 
         return project
+    
+    def get_supervisor_name(self, obj):
+        if obj.supervisor:
+            return f"{obj.supervisor.first_name} {obj.supervisor.last_name}".strip()
+        return None
 
 class AssignSupervisorSerializer(serializers.Serializer):
     supervisor_id = serializers.IntegerField()
@@ -169,4 +179,20 @@ class ProjectFeedbackSerializer(serializers.ModelSerializer):
 
         return feedback
     
+
+class SupervisorProjectReviewSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=[
+            ("SUPERVISOR_ASSIGNED", "Supervisor Assigned"),
+            ("PROPOSAL_APPROVED", "Proposal Approved"),
+            ("REVISION_REQUIRED", "Revision Required"),
+            ("IN_PROGRESS", "In Progress"),
+            ("READY_FOR_VIVA", "Ready For Viva"),
+            ("COMPLETED", "Completed"),
+            ("REJECTED", "Rejected"),
+        ]
+    )
+    comment = serializers.CharField(required=False, allow_blank=True)
+
+
 
