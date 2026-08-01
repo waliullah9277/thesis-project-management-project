@@ -1,21 +1,340 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework import status
-from rest_framework_simplejwt.tokens import RefreshToken
-from .models import User
-from accounts.serializers import AdminUserUpdateSerializer
+from io import BytesIO
 
-from .serializers import (
-    LoginSerializer,
-    ProfileSerializer,
-    FirstPasswordChangeSerializer,
-    ChangePasswordSerializer,
-    LogoutSerializer,
-    CreateUserSerializer,
-)
+from django.db import transaction
+from django.http import HttpResponse
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from .models import User
 from .permissions import IsSuperAdmin
-from .serializers import UserListSerializer
+from .serializers import (
+    AdminUserUpdateSerializer,
+    BulkUserImportSerializer,
+    ChangePasswordSerializer,
+    CreateUserSerializer,
+    FirstPasswordChangeSerializer,
+    LoginSerializer,
+    LogoutSerializer,
+    ProfileSerializer,
+    UserListSerializer,
+)
+
+
+# =========================================================
+# BULK IMPORT CONSTANTS
+# =========================================================
+
+
+BULK_USER_HEADERS = [
+    "role",
+    "student_id",
+    "email",
+    "first_name",
+    "last_name",
+    "phone",
+    "password",
+    "department",
+    "batch",
+    "semester",
+    "designation",
+    "project_start_term",
+    "project_start_year",
+    "project_duration",
+]
+
+
+ALLOWED_BULK_ROLES = {
+    "STUDENT",
+    "SUPERVISOR",
+    "EXAMINER",
+}
+
+
+# =========================================================
+# COMMON HELPERS
+# =========================================================
+
+
+def normalize_excel_header(value):
+    """
+    Convert an Excel header into a normalized API field name.
+    """
+
+    if value is None:
+        return ""
+
+    return (
+        str(value)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+
+def normalize_excel_text(value):
+    """
+    Convert Excel values into clean strings.
+
+    Integer-looking float values, such as 223001.0, become 223001.
+    """
+
+    if value is None:
+        return ""
+
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+
+    return str(value).strip()
+
+
+def normalize_optional_integer(value, field_name):
+    """
+    Convert an optional Excel value to an integer.
+    """
+
+    if value is None or str(value).strip() == "":
+        return None
+
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{field_name} must be a valid integer."
+        )
+
+    try:
+        numeric_value = float(value)
+
+        if not numeric_value.is_integer():
+            raise ValueError
+
+        return int(numeric_value)
+
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{field_name} must be a valid integer."
+        )
+
+
+def flatten_serializer_errors(errors):
+    """
+    Convert nested DRF serializer errors into a readable string.
+    """
+
+    messages = []
+
+    def collect(value, prefix=""):
+        if isinstance(value, dict):
+            for key, child_value in value.items():
+                child_prefix = (
+                    f"{prefix}.{key}"
+                    if prefix
+                    else str(key)
+                )
+
+                collect(
+                    child_value,
+                    child_prefix,
+                )
+
+        elif isinstance(value, (list, tuple)):
+            for child_value in value:
+                collect(
+                    child_value,
+                    prefix,
+                )
+
+        else:
+            text = str(value)
+
+            if prefix:
+                messages.append(
+                    f"{prefix}: {text}"
+                )
+            else:
+                messages.append(text)
+
+    collect(errors)
+
+    return " | ".join(messages) or "Invalid row data."
+
+
+def row_is_empty(row_values):
+    """
+    Return True when every cell in an Excel row is empty.
+    """
+
+    return all(
+        value is None
+        or str(value).strip() == ""
+        for value in row_values
+    )
+
+
+def prepare_bulk_user_payload(row_data):
+    """
+    Normalize and validate one Excel row before passing it to
+    CreateUserSerializer.
+    """
+
+    role = normalize_excel_text(
+        row_data.get("role")
+    ).upper()
+
+    student_id = normalize_excel_text(
+        row_data.get("student_id")
+    )
+
+    email = normalize_excel_text(
+        row_data.get("email")
+    ).lower()
+
+    first_name = normalize_excel_text(
+        row_data.get("first_name")
+    )
+
+    last_name = normalize_excel_text(
+        row_data.get("last_name")
+    )
+
+    phone = normalize_excel_text(
+        row_data.get("phone")
+    )
+
+    password = normalize_excel_text(
+        row_data.get("password")
+    )
+
+    department = normalize_excel_text(
+        row_data.get("department")
+    )
+
+    batch = normalize_excel_text(
+        row_data.get("batch")
+    )
+
+    semester = normalize_excel_text(
+        row_data.get("semester")
+    )
+
+    designation = normalize_excel_text(
+        row_data.get("designation")
+    )
+
+    project_start_term = normalize_excel_text(
+        row_data.get("project_start_term")
+    ).upper()
+
+    project_start_year = normalize_optional_integer(
+        row_data.get("project_start_year"),
+        "Project start year",
+    )
+
+    project_duration = normalize_optional_integer(
+        row_data.get("project_duration"),
+        "Project duration",
+    )
+
+    if not role:
+        raise ValueError("Role is required.")
+
+    if role not in ALLOWED_BULK_ROLES:
+        raise ValueError(
+            "Role must be STUDENT, SUPERVISOR or EXAMINER."
+        )
+
+    if not first_name:
+        raise ValueError("First name is required.")
+
+    if not password:
+        raise ValueError("Password is required.")
+
+    if len(password) < 8:
+        raise ValueError(
+            "Password must contain at least 8 characters."
+        )
+
+    payload = {
+        "role": role,
+        "student_id": student_id or None,
+        "email": email or None,
+        "first_name": first_name,
+        "last_name": last_name,
+        "phone": phone,
+        "password": password,
+        "department": department,
+        "batch": batch,
+        "semester": semester,
+        "designation": designation,
+    }
+
+    if role == "STUDENT":
+        if not student_id:
+            raise ValueError(
+                "Student ID is required for a student."
+            )
+
+        if not project_start_term:
+            raise ValueError(
+                "Project start semester is required for a student."
+            )
+
+        if project_start_year is None:
+            raise ValueError(
+                "Project start year is required for a student."
+            )
+
+        payload["email"] = None
+        payload["project_start_term"] = project_start_term
+        payload["project_start_year"] = project_start_year
+        payload["project_duration"] = (
+            project_duration
+            if project_duration is not None
+            else 3
+        )
+
+    else:
+        if not email:
+            raise ValueError(
+                "Email is required for a supervisor or examiner."
+            )
+
+        payload["student_id"] = None
+
+        # Semester fields are not used by Supervisor or Examiner.
+        payload["project_start_term"] = None
+        payload["project_start_year"] = None
+        payload["project_duration"] = 3
+
+    return payload
+
+
+def get_user_identifier(payload):
+    """
+    Return the most useful identifier for an import result.
+    """
+
+    if payload.get("role") == "STUDENT":
+        return payload.get("student_id") or "-"
+
+    return payload.get("email") or "-"
+
+
+# =========================================================
+# AUTHENTICATION
+# =========================================================
 
 
 class LoginAPIView(APIView):
@@ -23,51 +342,15 @@ class LoginAPIView(APIView):
     permission_classes = []
 
     def post(self, request):
-        login_id = request.data.get("login_id")
-        password = request.data.get("password")
+        serializer = LoginSerializer(
+            data=request.data,
+        )
 
-        if not login_id or not password:
-            return Response(
-                {
-                    "success": False,
-                    "message": "Login ID and password are required."
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        serializer.is_valid(
+            raise_exception=True,
+        )
 
-        user = None
-
-        try:
-            if "@" in login_id:
-                user = User.objects.get(email=login_id)
-            else:
-                user = User.objects.get(student_id=login_id)
-        except User.DoesNotExist:
-            return Response(
-                {
-                    "success": False,
-                    "message": "Invalid login ID or password."
-                },
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-
-        if not user.check_password(password):
-            return Response(
-                {
-                    "success": False,
-                    "message": "Invalid login ID or password."
-                },
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-
-        if not user.is_active:
-            return Response(
-                {
-                    "success": False,
-                    "message": "Your account has been deactivated. Please contact the administrator."
-                },
-                status=status.HTTP_403_FORBIDDEN
-            )
+        user = serializer.validated_data["user"]
 
         refresh = RefreshToken.for_user(user)
 
@@ -77,279 +360,1049 @@ class LoginAPIView(APIView):
                 "message": "Login successful.",
                 "access": str(refresh.access_token),
                 "refresh": str(refresh),
-                "force_password_change": user.must_change_password,
-                "user": ProfileSerializer(user).data,
+                "force_password_change": (
+                    user.must_change_password
+                ),
+                "user": ProfileSerializer(
+                    user,
+                    context={"request": request},
+                ).data,
             },
-            status=status.HTTP_200_OK
+            status=status.HTTP_200_OK,
         )
 
+
 class ProfileAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [
+        IsAuthenticated,
+    ]
 
     def get(self, request):
+        serializer = ProfileSerializer(
+            request.user,
+            context={"request": request},
+        )
+
         return Response({
             "success": True,
-            "data": ProfileSerializer(request.user).data
+            "data": serializer.data,
         })
 
 
 class FirstPasswordChangeAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [
+        IsAuthenticated,
+    ]
 
     def post(self, request):
-        serializer = FirstPasswordChangeSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        serializer = FirstPasswordChangeSerializer(
+            data=request.data,
+        )
+
+        serializer.is_valid(
+            raise_exception=True,
+        )
 
         user = request.user
-        user.set_password(serializer.validated_data["new_password"])
+
+        user.set_password(
+            serializer.validated_data[
+                "new_password"
+            ]
+        )
+
         user.is_first_login = False
         user.must_change_password = False
-        user.save()
+
+        user.save(
+            update_fields=[
+                "password",
+                "is_first_login",
+                "must_change_password",
+                "updated_at",
+            ]
+        )
 
         return Response({
             "success": True,
-            "message": "Password changed successfully. You can now access dashboard."
+            "message": (
+                "Password changed successfully. "
+                "You can now access the dashboard."
+            ),
         })
 
 
 class ChangePasswordAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [
+        IsAuthenticated,
+    ]
 
     def post(self, request):
         serializer = ChangePasswordSerializer(
             data=request.data,
-            context={"request": request}
+            context={"request": request},
         )
-        serializer.is_valid(raise_exception=True)
+
+        serializer.is_valid(
+            raise_exception=True,
+        )
 
         user = request.user
-        user.set_password(serializer.validated_data["new_password"])
-        user.save()
+
+        user.set_password(
+            serializer.validated_data[
+                "new_password"
+            ]
+        )
+
+        user.save(
+            update_fields=[
+                "password",
+                "updated_at",
+            ]
+        )
 
         return Response({
             "success": True,
-            "message": "Password changed successfully."
+            "message": (
+                "Password changed successfully."
+            ),
         })
 
 
 class LogoutAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [
+        IsAuthenticated,
+    ]
 
     def post(self, request):
-        serializer = LogoutSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        serializer = LogoutSerializer(
+            data=request.data,
+        )
+
+        serializer.is_valid(
+            raise_exception=True,
+        )
+
         serializer.save()
 
-        return Response({
-            "success": True,
-            "message": "Logout successful."
-        }, status=status.HTTP_200_OK)
-    
+        return Response(
+            {
+                "success": True,
+                "message": "Logout successful.",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+# =========================================================
+# SINGLE USER CREATE
+# =========================================================
+
 
 class CreateUserAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
 
     def post(self, request):
         serializer = CreateUserSerializer(
             data=request.data,
-            context={"request": request}
+            context={"request": request},
         )
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
 
-        return Response({
-            "success": True,
-            "message": "User created successfully.",
-            "data": serializer.data
-        }, status=status.HTTP_201_CREATED)
-    
+        serializer.is_valid(
+            raise_exception=True,
+        )
 
-class UserListAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+        user = serializer.save()
+
+        response_serializer = UserListSerializer(
+            user,
+            context={"request": request},
+        )
+
+        return Response(
+            {
+                "success": True,
+                "message": (
+                    "User created successfully."
+                ),
+                "data": response_serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+# =========================================================
+# BULK USER IMPORT
+# =========================================================
+
+
+class BulkUserImportAPIView(APIView):
+    """
+    Import Student, Supervisor and Examiner accounts from an
+    .xlsx Excel file.
+
+    Each row is processed independently. A failed row does not
+    roll back other successful rows.
+    """
+
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
+
+    parser_classes = [
+        MultiPartParser,
+        FormParser,
+    ]
+
+    def post(self, request):
+        upload_serializer = BulkUserImportSerializer(
+            data=request.data,
+        )
+
+        upload_serializer.is_valid(
+            raise_exception=True,
+        )
+
+        uploaded_file = (
+            upload_serializer.validated_data[
+                "file"
+            ]
+        )
+
+        try:
+            workbook = load_workbook(
+                filename=uploaded_file,
+                read_only=True,
+                data_only=True,
+            )
+
+        except Exception:
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "The Excel file could not be read. "
+                        "Please upload a valid .xlsx file."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            worksheet = workbook.active
+
+            rows = worksheet.iter_rows(
+                values_only=True,
+            )
+
+            try:
+                raw_headers = next(rows)
+
+            except StopIteration:
+                return Response(
+                    {
+                        "success": False,
+                        "message": (
+                            "The uploaded Excel file is empty."
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            normalized_headers = [
+                normalize_excel_header(header)
+                for header in raw_headers
+            ]
+
+            duplicate_headers = {
+                header
+                for header in normalized_headers
+                if header
+                and normalized_headers.count(header) > 1
+            }
+
+            if duplicate_headers:
+                return Response(
+                    {
+                        "success": False,
+                        "message": (
+                            "Duplicate Excel headers found: "
+                            + ", ".join(
+                                sorted(duplicate_headers)
+                            )
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            missing_headers = [
+                header
+                for header in BULK_USER_HEADERS
+                if header not in normalized_headers
+            ]
+
+            if missing_headers:
+                return Response(
+                    {
+                        "success": False,
+                        "message": (
+                            "Required Excel column(s) are missing: "
+                            + ", ".join(missing_headers)
+                        ),
+                        "required_headers": BULK_USER_HEADERS,
+                        "received_headers": normalized_headers,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            header_indexes = {
+                header: normalized_headers.index(header)
+                for header in BULK_USER_HEADERS
+            }
+
+            total_rows = 0
+            created_count = 0
+            failed_count = 0
+
+            created_users = []
+            errors = []
+
+            for excel_row_number, row_values in enumerate(
+                rows,
+                start=2,
+            ):
+                if row_is_empty(row_values):
+                    continue
+
+                total_rows += 1
+
+                row_data = {}
+
+                for header, column_index in (
+                    header_indexes.items()
+                ):
+                    row_data[header] = (
+                        row_values[column_index]
+                        if column_index < len(row_values)
+                        else None
+                    )
+
+                raw_identifier = (
+                    normalize_excel_text(
+                        row_data.get("student_id")
+                    )
+                    or normalize_excel_text(
+                        row_data.get("email")
+                    )
+                    or "-"
+                )
+
+                try:
+                    payload = prepare_bulk_user_payload(
+                        row_data
+                    )
+
+                    with transaction.atomic():
+                        user_serializer = (
+                            CreateUserSerializer(
+                                data=payload,
+                                context={
+                                    "request": request,
+                                },
+                            )
+                        )
+
+                        user_serializer.is_valid(
+                            raise_exception=True,
+                        )
+
+                        user = user_serializer.save()
+
+                    created_count += 1
+
+                    created_users.append({
+                        "row": excel_row_number,
+                        "id": user.id,
+                        "role": user.role,
+                        "identifier": (
+                            user.student_id
+                            or user.email
+                            or "-"
+                        ),
+                        "name": (
+                            f"{user.first_name or ''} "
+                            f"{user.last_name or ''}"
+                        ).strip(),
+                    })
+
+                except ValueError as error:
+                    failed_count += 1
+
+                    errors.append({
+                        "row": excel_row_number,
+                        "identifier": raw_identifier,
+                        "message": str(error),
+                    })
+
+                except Exception as error:
+                    failed_count += 1
+
+                    error_detail = getattr(
+                        error,
+                        "detail",
+                        None,
+                    )
+
+                    if error_detail is not None:
+                        message = flatten_serializer_errors(
+                            error_detail
+                        )
+                    else:
+                        message = str(error)
+
+                    errors.append({
+                        "row": excel_row_number,
+                        "identifier": raw_identifier,
+                        "message": (
+                            message
+                            or "User creation failed."
+                        ),
+                    })
+
+            if total_rows == 0:
+                return Response(
+                    {
+                        "success": False,
+                        "message": (
+                            "No user data rows were found "
+                            "in the Excel file."
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            response_data = {
+                "success": created_count > 0,
+                "message": (
+                    f"Bulk import completed. "
+                    f"{created_count} user(s) created and "
+                    f"{failed_count} row(s) failed."
+                ),
+                "total_rows": total_rows,
+                "created_count": created_count,
+                "failed_count": failed_count,
+                "created_users": created_users,
+                "errors": errors,
+            }
+
+            if created_count == total_rows:
+                response_status = (
+                    status.HTTP_201_CREATED
+                )
+
+            elif created_count > 0:
+                response_status = (
+                    status.HTTP_207_MULTI_STATUS
+                )
+
+            else:
+                response_status = (
+                    status.HTTP_400_BAD_REQUEST
+                )
+
+            return Response(
+                response_data,
+                status=response_status,
+            )
+
+        finally:
+            workbook.close()
+
+
+# =========================================================
+# BULK IMPORT TEMPLATE DOWNLOAD
+# =========================================================
+
+
+class BulkUserTemplateDownloadAPIView(APIView):
+    """
+    Download a ready-to-use Excel template for bulk user import.
+    """
+
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
 
     def get(self, request):
-        users = User.objects.all().order_by("-id")
-        serializer = UserListSerializer(users, many=True)
+        workbook = Workbook()
+
+        worksheet = workbook.active
+        worksheet.title = "Users"
+
+        header_fill = PatternFill(
+            fill_type="solid",
+            fgColor="1E3A5F",
+        )
+
+        header_font = Font(
+            color="FFFFFF",
+            bold=True,
+        )
+
+        required_fill = PatternFill(
+            fill_type="solid",
+            fgColor="D9EAF7",
+        )
+
+        example_fill = PatternFill(
+            fill_type="solid",
+            fgColor="F2F2F2",
+        )
+
+        for column_index, header in enumerate(
+            BULK_USER_HEADERS,
+            start=1,
+        ):
+            cell = worksheet.cell(
+                row=1,
+                column=column_index,
+                value=header,
+            )
+
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+            )
+
+        example_rows = [
+            [
+                "STUDENT",
+                "223001",
+                "",
+                "Rahim",
+                "Ahmed",
+                "01700000001",
+                "Student@123",
+                "CSE",
+                "223",
+                "8th",
+                "",
+                "FALL",
+                2026,
+                3,
+            ],
+            [
+                "SUPERVISOR",
+                "",
+                "supervisor@example.com",
+                "Karim",
+                "Hasan",
+                "01800000001",
+                "Teacher@123",
+                "CSE",
+                "",
+                "",
+                "Lecturer",
+                "",
+                "",
+                "",
+            ],
+            [
+                "EXAMINER",
+                "",
+                "examiner@example.com",
+                "Salma",
+                "Akter",
+                "01900000001",
+                "Examiner@123",
+                "CSE",
+                "",
+                "",
+                "Associate Professor",
+                "",
+                "",
+                "",
+            ],
+        ]
+
+        for row_index, example_row in enumerate(
+            example_rows,
+            start=2,
+        ):
+            for column_index, value in enumerate(
+                example_row,
+                start=1,
+            ):
+                cell = worksheet.cell(
+                    row=row_index,
+                    column=column_index,
+                    value=value,
+                )
+
+                cell.fill = example_fill
+                cell.alignment = Alignment(
+                    vertical="top",
+                )
+
+        # Keep IDs, phone numbers and passwords as text.
+        text_columns = {
+            "student_id",
+            "phone",
+            "password",
+            "batch",
+            "semester",
+        }
+
+        for header in text_columns:
+            column_index = (
+                BULK_USER_HEADERS.index(header)
+                + 1
+            )
+
+            for row_number in range(
+                2,
+                worksheet.max_row + 1,
+            ):
+                worksheet.cell(
+                    row=row_number,
+                    column=column_index,
+                ).number_format = "@"
+
+        required_headers = {
+            "role",
+            "first_name",
+            "password",
+        }
+
+        for header in required_headers:
+            column_index = (
+                BULK_USER_HEADERS.index(header)
+                + 1
+            )
+
+            worksheet.cell(
+                row=1,
+                column=column_index,
+            ).fill = required_fill
+
+            worksheet.cell(
+                row=1,
+                column=column_index,
+            ).font = Font(
+                color="000000",
+                bold=True,
+            )
+
+        column_widths = {
+            "role": 18,
+            "student_id": 18,
+            "email": 30,
+            "first_name": 18,
+            "last_name": 18,
+            "phone": 18,
+            "password": 20,
+            "department": 18,
+            "batch": 14,
+            "semester": 14,
+            "designation": 24,
+            "project_start_term": 24,
+            "project_start_year": 22,
+            "project_duration": 20,
+        }
+
+        for column_index, header in enumerate(
+            BULK_USER_HEADERS,
+            start=1,
+        ):
+            worksheet.column_dimensions[
+                get_column_letter(column_index)
+            ].width = column_widths.get(
+                header,
+                18,
+            )
+
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = (
+            f"A1:{get_column_letter(len(BULK_USER_HEADERS))}"
+            f"{worksheet.max_row}"
+        )
+
+        instruction_sheet = (
+            workbook.create_sheet(
+                title="Instructions"
+            )
+        )
+
+        instructions = [
+            [
+                "Bulk User Import Instructions"
+            ],
+            [
+                "1. Do not rename or delete any header column."
+            ],
+            [
+                "2. Allowed roles: STUDENT, SUPERVISOR, EXAMINER."
+            ],
+            [
+                "3. Every row requires role, first_name and password."
+            ],
+            [
+                "4. Password must contain at least 8 characters."
+            ],
+            [
+                (
+                    "5. A STUDENT requires student_id, "
+                    "project_start_term and project_start_year."
+                )
+            ],
+            [
+                (
+                    "6. Allowed project_start_term values: "
+                    "SPRING, SUMMER, FALL."
+                )
+            ],
+            [
+                (
+                    "7. A SUPERVISOR or EXAMINER requires email."
+                )
+            ],
+            [
+                (
+                    "8. project_duration defaults to 3 when "
+                    "left blank for a student."
+                )
+            ],
+            [
+                (
+                    "9. Keep Student ID and phone cells formatted "
+                    "as Text to preserve leading zeroes."
+                )
+            ],
+            [
+                (
+                    "10. Remove the example rows before importing "
+                    "your real users."
+                )
+            ],
+        ]
+
+        for row_index, instruction in enumerate(
+            instructions,
+            start=1,
+        ):
+            cell = instruction_sheet.cell(
+                row=row_index,
+                column=1,
+                value=instruction[0],
+            )
+
+            cell.alignment = Alignment(
+                wrap_text=True,
+                vertical="top",
+            )
+
+            if row_index == 1:
+                cell.font = Font(
+                    bold=True,
+                    size=14,
+                )
+
+        instruction_sheet.column_dimensions[
+            "A"
+        ].width = 95
+
+        output = BytesIO()
+
+        workbook.save(output)
+        workbook.close()
+
+        output.seek(0)
+
+        response = HttpResponse(
+            output.getvalue(),
+            content_type=(
+                "application/vnd.openxmlformats-"
+                "officedocument.spreadsheetml.sheet"
+            ),
+        )
+
+        response[
+            "Content-Disposition"
+        ] = (
+            'attachment; filename="bulk_user_import_template.xlsx"'
+        )
+
+        return response
+
+
+# =========================================================
+# USER LIST AND DETAILS
+# =========================================================
+
+
+class UserListAPIView(APIView):
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
+
+    def get(self, request):
+        users = (
+            User.objects.select_related(
+                "created_by",
+            )
+            .all()
+            .order_by("-id")
+        )
+
+        serializer = UserListSerializer(
+            users,
+            many=True,
+            context={"request": request},
+        )
 
         return Response({
             "success": True,
             "count": users.count(),
-            "data": serializer.data
+            "data": serializer.data,
         })
 
 
 class UserDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
 
     def get(self, request, user_id):
         try:
-            user = User.objects.get(id=user_id)
-        except User.DoesNotExist:
-            return Response({
-                "success": False,
-                "message": "User not found."
-            }, status=status.HTTP_404_NOT_FOUND)
+            user = User.objects.get(
+                id=user_id,
+            )
 
-        serializer = UserListSerializer(user)
+        except User.DoesNotExist:
+            return Response(
+                {
+                    "success": False,
+                    "message": "User not found.",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = UserListSerializer(
+            user,
+            context={"request": request},
+        )
 
         return Response({
             "success": True,
-            "data": serializer.data
+            "data": serializer.data,
         })
-    
+
+
+# =========================================================
+# USER STATUS UPDATE
+# =========================================================
+
 
 class UserStatusUpdateAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
 
     def patch(self, request, user_id):
         try:
-            user = User.objects.get(id=user_id)
+            user = User.objects.get(
+                id=user_id,
+            )
+
         except User.DoesNotExist:
-            return Response({
-                "success": False,
-                "message": "User not found."
-            }, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {
+                    "success": False,
+                    "message": "User not found.",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         if user.role == "SUPER_ADMIN":
-            return Response({
-                "success": False,
-                "message": "Super admin status cannot be changed."
-            }, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "Super Admin status cannot be changed."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        is_active = request.data.get("is_active")
+        is_active = request.data.get(
+            "is_active"
+        )
 
-        if is_active is None:
-            return Response({
-                "success": False,
-                "message": "is_active field is required."
-            }, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(is_active, bool):
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "is_active must be true or false."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         user.is_active = is_active
-        user.save()
+
+        user.save(
+            update_fields=[
+                "is_active",
+                "updated_at",
+            ]
+        )
 
         return Response({
             "success": True,
-            "message": "User status updated successfully.",
+            "message": (
+                "User status updated successfully."
+            ),
             "data": {
                 "id": user.id,
                 "email": user.email,
                 "student_id": user.student_id,
                 "role": user.role,
-                "is_active": user.is_active
-            }
+                "is_active": user.is_active,
+            },
         })
-    
+
+
+# =========================================================
+# ADMIN USER UPDATE
+# =========================================================
+
 
 class AdminUserUpdateAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
 
     def put(self, request, user_id):
+        return self.update_user(
+            request,
+            user_id,
+        )
+
+    def patch(self, request, user_id):
+        return self.update_user(
+            request,
+            user_id,
+        )
+
+    def update_user(self, request, user_id):
         try:
-            user = User.objects.get(id=user_id)
+            user = User.objects.get(
+                id=user_id,
+            )
+
         except User.DoesNotExist:
-            return Response({
-                "success": False,
-                "message": "User not found."
-            }, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {
+                    "success": False,
+                    "message": "User not found.",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         serializer = AdminUserUpdateSerializer(
             user,
             data=request.data,
-            partial=True
+            partial=True,
+            context={"request": request},
         )
 
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        serializer.is_valid(
+            raise_exception=True,
+        )
+
+        updated_user = serializer.save()
+
+        response_serializer = UserListSerializer(
+            updated_user,
+            context={"request": request},
+        )
 
         return Response({
             "success": True,
-            "message": "User updated successfully.",
-            "data": ProfileSerializer(user).data
+            "message": (
+                "User updated successfully."
+            ),
+            "data": response_serializer.data,
         })
 
 
+# =========================================================
+# ADMIN USER DELETE
+# =========================================================
+
+
 class AdminUserDeleteAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
 
     def delete(self, request, user_id):
         try:
-            user = User.objects.get(id=user_id)
+            user = User.objects.get(
+                id=user_id,
+            )
+
         except User.DoesNotExist:
-            return Response({
-                "success": False,
-                "message": "User not found."
-            }, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {
+                    "success": False,
+                    "message": "User not found.",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         if user.id == request.user.id:
-            return Response({
-                "success": False,
-                "message": "You cannot delete your own account."
-            }, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "You cannot delete your own account."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if user.role == "SUPER_ADMIN":
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "A Super Admin account cannot be "
+                        "deleted from this endpoint."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         user.delete()
 
         return Response({
             "success": True,
-            "message": "User deleted successfully."
+            "message": (
+                "User deleted successfully."
+            ),
         })
-
-
-# temorary api for testing
-# from rest_framework.views import APIView
-# from rest_framework.response import Response
-# from rest_framework import status
-# from accounts.models import User
-
-
-# class TemporaryCreateSuperAdminAPIView(APIView):
-#     authentication_classes = []
-#     permission_classes = []
-
-#     def post(self, request):
-#         try:
-#             email = request.data.get("email")
-#             password = request.data.get("password")
-#             first_name = request.data.get("first_name", "Super")
-#             last_name = request.data.get("last_name", "Admin")
-#             phone = request.data.get("phone", "01700000000")
-
-#             if not email or not password:
-#                 return Response({
-#                     "success": False,
-#                     "message": "Email and password are required."
-#                 }, status=400)
-
-#             if User.objects.filter(email=email).exists():
-#                 return Response({
-#                     "success": False,
-#                     "message": "User already exists."
-#                 }, status=400)
-
-#             user = User(
-#                 email=email,
-#                 first_name=first_name,
-#                 last_name=last_name,
-#                 phone=phone,
-#                 role="SUPER_ADMIN",
-#                 is_active=True,
-#                 is_staff=True,
-#                 is_superuser=True,
-#                 is_first_login=False,
-#                 must_change_password=False,
-#             )
-
-#             user.set_password(password)
-#             user.save()
-
-#             return Response({
-#                 "success": True,
-#                 "message": "Super Admin created successfully.",
-#                 "email": user.email,
-#                 "role": user.role
-#             }, status=201)
-
-#         except Exception as e:
-#             return Response({
-#                 "success": False,
-#                 "error": str(e)
-#             }, status=500)
