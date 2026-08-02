@@ -545,8 +545,9 @@ class BulkUserImportAPIView(APIView):
     Import Student, Supervisor and Examiner accounts from an
     .xlsx Excel file.
 
-    Each row is processed independently. A failed row does not
-    roll back other successful rows.
+    The complete file is validated first. If any row is invalid,
+    no user is created. All valid rows are then created inside
+    one database transaction.
     """
 
     permission_classes = [
@@ -568,11 +569,9 @@ class BulkUserImportAPIView(APIView):
             raise_exception=True,
         )
 
-        uploaded_file = (
-            upload_serializer.validated_data[
-                "file"
-            ]
-        )
+        uploaded_file = upload_serializer.validated_data[
+            "file"
+        ]
 
         try:
             workbook = load_workbook(
@@ -665,12 +664,12 @@ class BulkUserImportAPIView(APIView):
                 for header in BULK_USER_HEADERS
             }
 
-            total_rows = 0
-            created_count = 0
-            failed_count = 0
-
-            created_users = []
+            prepared_rows = []
             errors = []
+            total_rows = 0
+
+            excel_student_ids = set()
+            excel_emails = set()
 
             for excel_row_number, row_values in enumerate(
                 rows,
@@ -683,9 +682,7 @@ class BulkUserImportAPIView(APIView):
 
                 row_data = {}
 
-                for header, column_index in (
-                    header_indexes.items()
-                ):
+                for header, column_index in header_indexes.items():
                     row_data[header] = (
                         row_values[column_index]
                         if column_index < len(row_values)
@@ -707,42 +704,62 @@ class BulkUserImportAPIView(APIView):
                         row_data
                     )
 
-                    with transaction.atomic():
-                        user_serializer = (
-                            CreateUserSerializer(
-                                data=payload,
-                                context={
-                                    "request": request,
-                                },
+                    identifier = get_user_identifier(
+                        payload
+                    )
+
+                    if payload["role"] == "STUDENT":
+                        student_id_key = (
+                            payload["student_id"]
+                            .strip()
+                            .lower()
+                        )
+
+                        if student_id_key in excel_student_ids:
+                            raise ValueError(
+                                "Duplicate student ID found "
+                                "inside the Excel file."
                             )
+
+                        excel_student_ids.add(
+                            student_id_key
                         )
 
-                        user_serializer.is_valid(
-                            raise_exception=True,
+                    else:
+                        email_key = (
+                            payload["email"]
+                            .strip()
+                            .lower()
                         )
 
-                        user = user_serializer.save()
+                        if email_key in excel_emails:
+                            raise ValueError(
+                                "Duplicate email found "
+                                "inside the Excel file."
+                            )
 
-                    created_count += 1
+                        excel_emails.add(
+                            email_key
+                        )
 
-                    created_users.append({
+                    serializer = CreateUserSerializer(
+                        data=payload,
+                        context={
+                            "request": request,
+                        },
+                    )
+
+                    serializer.is_valid(
+                        raise_exception=True,
+                    )
+
+                    prepared_rows.append({
                         "row": excel_row_number,
-                        "id": user.id,
-                        "role": user.role,
-                        "identifier": (
-                            user.student_id
-                            or user.email
-                            or "-"
-                        ),
-                        "name": (
-                            f"{user.first_name or ''} "
-                            f"{user.last_name or ''}"
-                        ).strip(),
+                        "identifier": identifier,
+                        "serializer": serializer,
                     })
 
                 except ValueError as error:
-                    failed_count += 1
-
                     errors.append({
                         "row": excel_row_number,
                         "identifier": raw_identifier,
@@ -750,8 +767,6 @@ class BulkUserImportAPIView(APIView):
                     })
 
                 except Exception as error:
-                    failed_count += 1
-
                     error_detail = getattr(
                         error,
                         "detail",
@@ -770,7 +785,7 @@ class BulkUserImportAPIView(APIView):
                         "identifier": raw_identifier,
                         "message": (
                             message
-                            or "User creation failed."
+                            or "Row validation failed."
                         ),
                     })
 
@@ -786,43 +801,89 @@ class BulkUserImportAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            response_data = {
-                "success": created_count > 0,
-                "message": (
-                    f"Bulk import completed. "
-                    f"{created_count} user(s) created and "
-                    f"{failed_count} row(s) failed."
-                ),
-                "total_rows": total_rows,
-                "created_count": created_count,
-                "failed_count": failed_count,
-                "created_users": created_users,
-                "errors": errors,
-            }
-
-            if created_count == total_rows:
-                response_status = (
-                    status.HTTP_201_CREATED
+            # Stop before creating anything when any row fails.
+            if errors:
+                return Response(
+                    {
+                        "success": False,
+                        "message": (
+                            f"Bulk import cancelled. "
+                            f"{len(errors)} row(s) contain errors. "
+                            f"No user was created."
+                        ),
+                        "total_rows": total_rows,
+                        "created_count": 0,
+                        "failed_count": len(errors),
+                        "created_users": [],
+                        "errors": errors,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            elif created_count > 0:
-                response_status = (
-                    status.HTTP_207_MULTI_STATUS
-                )
+            created_users = []
 
-            else:
-                response_status = (
-                    status.HTTP_400_BAD_REQUEST
+            # All rows are created in one transaction.
+            # An unexpected failure rolls back the complete import.
+            try:
+                with transaction.atomic():
+                    for prepared_row in prepared_rows:
+                        serializer = prepared_row[
+                            "serializer"
+                        ]
+
+                        user = serializer.save()
+
+                        created_users.append({
+                            "row": prepared_row["row"],
+                            "id": user.id,
+                            "role": user.role,
+                            "identifier": (
+                                user.student_id
+                                or user.email
+                                or "-"
+                            ),
+                            "name": (
+                                f"{user.first_name or ''} "
+                                f"{user.last_name or ''}"
+                            ).strip(),
+                        })
+
+            except Exception as error:
+                return Response(
+                    {
+                        "success": False,
+                        "message": (
+                            "Bulk import failed while creating "
+                            "users. No user was saved."
+                        ),
+                        "detail": str(error),
+                        "total_rows": total_rows,
+                        "created_count": 0,
+                        "failed_count": total_rows,
+                        "created_users": [],
+                        "errors": [],
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
             return Response(
-                response_data,
-                status=response_status,
+                {
+                    "success": True,
+                    "message": (
+                        f"Bulk import completed successfully. "
+                        f"{len(created_users)} user(s) created."
+                    ),
+                    "total_rows": total_rows,
+                    "created_count": len(created_users),
+                    "failed_count": 0,
+                    "created_users": created_users,
+                    "errors": [],
+                },
+                status=status.HTTP_201_CREATED,
             )
 
         finally:
             workbook.close()
-
 
 # =========================================================
 # BULK IMPORT TEMPLATE DOWNLOAD
