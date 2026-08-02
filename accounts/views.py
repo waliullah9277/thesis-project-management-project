@@ -1467,3 +1467,108 @@ class AdminUserDeleteAPIView(APIView):
                 "User deleted successfully."
             ),
         })
+        
+        
+        
+class BulkUserDeleteAPIView(APIView):
+    permission_classes = [
+        IsAuthenticated,
+        IsSuperAdmin,
+    ]
+
+    def post(self, request):
+        user_ids = request.data.get("user_ids", [])
+
+        if not isinstance(user_ids, list):
+            return Response(
+                {
+                    "success": False,
+                    "message": "user_ids must be a list.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            user_ids = [
+                int(user_id)
+                for user_id in user_ids
+            ]
+        except (TypeError, ValueError):
+            return Response(
+                {
+                    "success": False,
+                    "message": "One or more user IDs are invalid.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_ids = list(set(user_ids))
+
+        if not user_ids:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Please select at least one user.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if request.user.id in user_ids:
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "You cannot delete your own account."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        users = User.objects.filter(
+            id__in=user_ids,
+        )
+
+        super_admin_exists = users.filter(
+            role="SUPER_ADMIN",
+        ).exists()
+
+        if super_admin_exists:
+            return Response(
+                {
+                    "success": False,
+                    "message": (
+                        "Super Admin accounts cannot be deleted."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        found_ids = set(
+            users.values_list(
+                "id",
+                flat=True,
+            )
+        )
+
+        missing_ids = [
+            user_id
+            for user_id in user_ids
+            if user_id not in found_ids
+        ]
+
+        deleted_count = users.count()
+
+        with transaction.atomic():
+            users.delete()
+
+        return Response(
+            {
+                "success": True,
+                "message": (
+                    f"{deleted_count} user(s) deleted successfully."
+                ),
+                "deleted_count": deleted_count,
+                "missing_ids": missing_ids,
+            },
+            status=status.HTTP_200_OK,
+        )

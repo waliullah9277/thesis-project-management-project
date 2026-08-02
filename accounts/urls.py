@@ -7,6 +7,7 @@ from rest_framework_simplejwt.views import (
 from .views import (
     AdminUserDeleteAPIView,
     AdminUserUpdateAPIView,
+    BulkUserDeleteAPIView,
     BulkUserImportAPIView,
     BulkUserTemplateDownloadAPIView,
     ChangePasswordAPIView,
@@ -117,4 +118,10 @@ urlpatterns = [
         AdminUserDeleteAPIView.as_view(),
         name="admin-user-delete",
     ),
+    
+    path(
+    "users/bulk-delete/",
+    BulkUserDeleteAPIView.as_view(),
+    name="bulk-user-delete",
+),
 ]
